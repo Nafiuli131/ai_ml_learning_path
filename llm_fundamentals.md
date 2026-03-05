@@ -10,6 +10,256 @@ A **Large Language Model (LLM)** is a neural network trained on massive amounts 
 
 Modern LLMs are built on the **Transformer** architecture (introduced in the 2017 paper *"Attention Is All You Need"*).
 
+### Transformer Architecture — Visual Overview
+
+```
+ INPUT: "The cat sat on"
+   │
+   ▼
+┌──────────────────────────────────────────────────────────┐
+│                   TOKEN EMBEDDINGS                       │
+│                                                          │
+│   "The"    "cat"    "sat"    "on"                        │
+│    │        │        │        │                           │
+│    ▼        ▼        ▼        ▼                           │
+│  [0.2,..] [0.8,..] [0.1,..] [0.5,..]   ← each token    │
+│                                           becomes a      │
+│                                           vector         │
+└──────────────┬───────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────┐
+│               POSITIONAL ENCODING                        │
+│                                                          │
+│   Adds position information so the model knows           │
+│   token order (Transformers have no built-in             │
+│   sense of sequence unlike RNNs)                         │
+│                                                          │
+│   Token Vector + Position Vector = Input Embedding       │
+└──────────────┬───────────────────────────────────────────┘
+               │
+               ▼
+┌══════════════════════════════════════════════════════════╗
+║            TRANSFORMER BLOCK  (× N layers)              ║
+║     (GPT-3: 96 layers, Claude/GPT-4: ~100+ layers)     ║
+║                                                          ║
+║  ┌────────────────────────────────────────────────────┐  ║
+║  │         MULTI-HEAD SELF-ATTENTION                  │  ║
+║  │                                                    │  ║
+║  │  Each token asks: "Which other tokens should I     │  ║
+║  │  pay attention to?"                                │  ║
+║  │                                                    │  ║
+║  │  ┌─────────┐  ┌─────────┐  ┌─────────┐            │  ║
+║  │  │ Head 1  │  │ Head 2  │  │ Head N  │            │  ║
+║  │  │         │  │         │  │         │   Multiple  │  ║
+║  │  │ Q  K  V │  │ Q  K  V │  │ Q  K  V │   heads    │  ║
+║  │  │  ╲ │ ╱  │  │  ╲ │ ╱  │  │  ╲ │ ╱  │   attend   │  ║
+║  │  │  Attn   │  │  Attn   │  │  Attn   │   to diff  │  ║
+║  │  │ Scores  │  │ Scores  │  │ Scores  │   patterns  │  ║
+║  │  └────┬────┘  └────┬────┘  └────┬────┘            │  ║
+║  │       └────────────┼────────────┘                  │  ║
+║  │                    ▼                               │  ║
+║  │              [ Concatenate ]                       │  ║
+║  │                    │                               │  ║
+║  │              [ Linear Layer ]                      │  ║
+║  └────────────────────┬───────────────────────────────┘  ║
+║                       │                                  ║
+║                 ┌─────▼─────┐                            ║
+║                 │ Add & Norm│  ← Residual connection     ║
+║                 └─────┬─────┘    + Layer normalization   ║
+║                       │                                  ║
+║  ┌────────────────────▼───────────────────────────────┐  ║
+║  │          FEED-FORWARD NETWORK (FFN)                │  ║
+║  │                                                    │  ║
+║  │   Input ──→ [ Linear ] ──→ [ ReLU/GELU ] ──→      │  ║
+║  │             (expand 4×)     (activation)           │  ║
+║  │                                                    │  ║
+║  │         ──→ [ Linear ] ──→ Output                  │  ║
+║  │             (compress)                             │  ║
+║  │                                                    │  ║
+║  │   This is where "knowledge" is stored.             │  ║
+║  │   Acts as a key-value memory bank.                 │  ║
+║  └────────────────────┬───────────────────────────────┘  ║
+║                       │                                  ║
+║                 ┌─────▼─────┐                            ║
+║                 │ Add & Norm│  ← Another residual        ║
+║                 └─────┬─────┘                            ║
+║                       │                                  ║
+╚═══════════════════════╪══════════════════════════════════╝
+         ▲              │              Repeat
+         └──────────────┘              N times
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│                    OUTPUT HEAD                            │
+│                                                          │
+│   Final hidden state ──→ Linear Layer ──→ Softmax        │
+│                                                          │
+│   Produces probability over entire vocabulary:           │
+│                                                          │
+│     "the"   → 0.52      "mat"    → 0.03                 │
+│     "a"     → 0.11      "table"  → 0.02                 │
+│     "his"   → 0.07      "floor"  → 0.01                 │
+│     "her"   → 0.05      ...      → ...                  │
+│                                                          │
+│   Selected token (via temperature/sampling): "the"       │
+└──────────────────────────────────────────────────────────┘
+               │
+               ▼
+ OUTPUT: "the"  →  append to input  →  re-run for next token
+```
+
+### Self-Attention — How It Actually Works
+
+```
+ Example: "The cat sat on the mat because it was tired"
+                                          ▲
+                                          │
+                            What does "it" refer to?
+
+ Self-Attention computes three vectors per token:
+
+ ┌─────────────────────────────────────────────────────────┐
+ │  Q (Query)  = "What am I looking for?"                  │
+ │  K (Key)    = "What do I contain?"                      │
+ │  V (Value)  = "What information do I provide?"          │
+ └─────────────────────────────────────────────────────────┘
+
+ For the token "it":
+   Q("it") compares against every K:
+
+     Q("it") · K("The")     = 0.1   (low relevance)
+     Q("it") · K("cat")     = 0.8   ← HIGH (it = cat!)
+     Q("it") · K("sat")     = 0.2
+     Q("it") · K("on")      = 0.05
+     Q("it") · K("the")     = 0.1
+     Q("it") · K("mat")     = 0.3
+     Q("it") · K("because") = 0.1
+     Q("it") · K("it")      = 0.4
+     Q("it") · K("was")     = 0.15
+
+ These scores (after softmax) become attention weights:
+
+   "The" "cat" "sat" "on" "the" "mat" "because" "it" "was"
+    2%    45%   5%   1%    2%    15%     3%      20%   7%
+          ████                   ██              ███
+
+ The output for "it" is a weighted sum of all V vectors,
+ heavily influenced by "cat" → so the model understands
+ "it" refers to "cat".
+```
+
+### Causal (Autoregressive) Masking
+
+```
+ LLMs use CAUSAL masking — each token can only attend
+ to itself and tokens BEFORE it (not future tokens):
+
+              The   cat   sat   on
+   The     [  ✓     ✗     ✗     ✗  ]
+   cat     [  ✓     ✓     ✗     ✗  ]
+   sat     [  ✓     ✓     ✓     ✗  ]
+   on      [  ✓     ✓     ✓     ✓  ]
+
+   ✓ = can attend    ✗ = masked (cannot see future)
+
+ This is why LLMs generate left-to-right, one token
+ at a time — they are never "cheating" by looking ahead.
+```
+
+### Multi-Head Attention — Why Multiple Heads?
+
+```
+ Different attention heads learn to focus on different
+ linguistic relationships:
+
+ ┌──────────────────────────────────────────────────┐
+ │  Head 1: Syntactic (subject-verb agreement)      │
+ │  "The dogs  ───────────→  are running"           │
+ │              (plural)       (plural verb)         │
+ ├──────────────────────────────────────────────────┤
+ │  Head 2: Coreference (pronoun resolution)        │
+ │  "Mary said she ──→ would leave"                 │
+ │              (she = Mary)                         │
+ ├──────────────────────────────────────────────────┤
+ │  Head 3: Semantic (meaning relationships)        │
+ │  "The doctor treated the patient"                │
+ │       ▲                    ▲                      │
+ │       └── medical ─────── ┘                      │
+ ├──────────────────────────────────────────────────┤
+ │  Head 4: Positional (nearby context)             │
+ │  "New ←→ York"  "ice ←→ cream"                  │
+ │   (adjacent word compounds)                      │
+ └──────────────────────────────────────────────────┘
+
+ GPT-3 uses 96 attention heads per layer × 96 layers
+ = 9,216 different attention patterns!
+```
+
+### Full Data Flow — End to End
+
+```
+ ┌─────────────┐
+ │ Raw Text    │  "The cat sat on"
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ Tokenizer   │  ["The", " cat", " sat", " on"]  → [464, 3857, 3332, 319]
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ Embedding   │  Token IDs → Dense vectors (dim: 4096–12288)
+ │ + Position  │  + Positional info added
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ Layer 1     │  Self-Attention → FFN → surface-level patterns
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ Layer 2     │  Self-Attention → FFN → basic syntax
+ └──────┬──────┘
+        ▼
+      . . .
+        ▼
+ ┌─────────────┐
+ │ Layer N/2   │  Self-Attention → FFN → semantic understanding
+ └──────┬──────┘
+        ▼
+      . . .
+        ▼
+ ┌─────────────┐
+ │ Layer N     │  Self-Attention → FFN → abstract reasoning
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ LM Head     │  Project to vocabulary → softmax → probabilities
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ Sampling    │  temperature / top-p / top-k → select token
+ └──────┬──────┘
+        ▼
+ ┌─────────────┐
+ │ Output      │  "the" → append & repeat
+ └─────────────┘
+```
+
+### Scale of Modern LLMs
+
+```
+ ┌──────────────┬──────────────┬──────────┬─────────────────┐
+ │    Model     │  Parameters  │  Layers  │  Hidden Size    │
+ ├──────────────┼──────────────┼──────────┼─────────────────┤
+ │ GPT-2       │    1.5B      │    48    │     1,600       │
+ │ GPT-3       │    175B      │    96    │    12,288       │
+ │ LLaMA 2 70B │    70B       │    80    │     8,192       │
+ │ GPT-4       │   ~1.8T*     │   ~120*  │   ~12,288*      │
+ │ Claude 3+   │   undisclosed│          │                 │
+ └──────────────┴──────────────┴──────────┴─────────────────┘
+  * estimated / rumored
+```
+
 Key components:
 
 - **Embedding Layer** — Converts each input token into a high-dimensional vector (a list of numbers) that captures its meaning.
