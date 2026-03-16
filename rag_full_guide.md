@@ -74,6 +74,336 @@ Think of it like an open-book exam:
 
 ---
 
+## Wait — How Does the LLM Know to Use RAG?
+
+This is a very important question beginners have. The answer is:
+
+### The LLM Does NOT Decide. YOUR CODE Decides.
+
+The LLM is **dumb by itself**. It doesn't know your PDFs exist. It doesn't go looking for documents. **You (the developer) build a system around the LLM** that fetches the right data and feeds it in.
+
+Think of it like this:
+
+```
+WITHOUT RAG (normal chatbot):
+┌──────────┐                    ┌─────────┐
+│   User   │───"What is our ──>│   LLM   │──> "I don't know your policy"
+│          │   refund policy?"  │         │
+└──────────┘                    └─────────┘
+The LLM only sees the question. That's it. It has no access to your documents.
+
+
+WITH RAG (your code does the work):
+┌──────────┐     ┌───────────────────────────────────┐     ┌─────────┐
+│   User   │──>  │  YOUR RAG CODE (middleware):      │──>  │   LLM   │
+│          │     │                                    │     │         │
+│ "What is │     │  1. Take user's question           │     │ Receives│
+│  our     │     │  2. Search vector DB for matches   │     │ question│
+│  refund  │     │  3. Find: "refund within 30 days"  │     │    +    │
+│  policy?"│     │  4. Stuff it into the prompt       │     │ context │
+│          │     │  5. Send BOTH to LLM               │     │    ↓    │
+└──────────┘     └───────────────────────────────────┘     │ "Refund │
+                                                           │  within │
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^           │ 30 days"│
+                 THIS IS YOUR CODE, NOT THE LLM            └─────────┘
+```
+
+### The LLM Just Sees a Really Good Prompt
+
+When you use RAG, the LLM doesn't "go to the PDF." Instead, **your code** searches the vector database, finds relevant chunks, and **pastes them into the prompt** before sending it to the LLM.
+
+Here's what the LLM actually receives:
+
+```
+WITHOUT RAG — what the LLM sees:
+┌─────────────────────────────────────────────┐
+│ User: What is our refund policy?            │
+└─────────────────────────────────────────────┘
+LLM thinks: "I have no idea what this company's policy is..." → bad answer
+
+WITH RAG — what the LLM sees:
+┌─────────────────────────────────────────────┐
+│ System: Answer using ONLY the context below.│
+│                                             │
+│ Context:                                    │
+│ - "Refund policy: customers may return      │
+│    items within 30 days for a full refund.  │
+│    Items must be in original packaging."    │
+│                                             │
+│ User: What is our refund policy?            │
+└─────────────────────────────────────────────┘
+LLM thinks: "The context says 30 days, original packaging..." → great answer!
+```
+
+**The LLM doesn't know RAG exists.** It just sees a longer prompt with useful context. Your code did all the work behind the scenes.
+
+### So Who Decides WHEN to Use RAG?
+
+There are 3 common approaches:
+
+#### Approach 1: Always Use RAG (Simplest — Most Common)
+
+Every user question goes through the vector search, no matter what.
+
+```python
+# EVERY question triggers a search
+def answer(user_question):
+    chunks = vector_db.search(user_question, top_k=3)   # always search
+    context = "\n".join(chunks)
+    prompt = f"Context: {context}\n\nQuestion: {user_question}"
+    return llm.generate(prompt)
+```
+
+**Pros:** Simple, never misses relevant context
+**Cons:** Wastes a search call on questions like "hi" or "thanks"
+
+#### Approach 2: Router / Classifier (Medium Complexity)
+
+Use a small LLM or classifier to decide: "Does this question need RAG or not?"
+
+```python
+def answer(user_question):
+    # Step 1: Ask a small/cheap LLM to classify
+    needs_rag = classifier.predict(
+        f"Does this question require searching documents? "
+        f"Question: '{user_question}' "
+        f"Answer YES or NO."
+    )
+
+    if needs_rag == "YES":
+        chunks = vector_db.search(user_question, top_k=3)
+        context = "\n".join(chunks)
+        prompt = f"Context: {context}\n\nQuestion: {user_question}"
+    else:
+        prompt = user_question   # no context needed
+
+    return llm.generate(prompt)
+```
+
+```
+"What is our refund policy?"  → YES → search docs → answer with context
+"Hi, how are you?"            → NO  → just chat normally
+"Summarize yesterday's report"→ YES → search docs → answer with context
+"What is 2 + 2?"              → NO  → just answer directly
+```
+
+#### Approach 3: Agentic RAG (Advanced — Tool Use)
+
+Give the LLM a **tool** it can choose to call. The LLM itself decides when to search.
+
+```python
+tools = [
+    {
+        "name": "search_company_docs",
+        "description": "Search internal company documents for information",
+        "parameters": {"query": "the search query"}
+    }
+]
+
+# LLM decides: "I need to search for refund policy" → calls the tool
+# LLM decides: "2+2 is just math, no tool needed" → answers directly
+response = llm.chat(
+    messages=[{"role": "user", "content": user_question}],
+    tools=tools
+)
+```
+
+This is how ChatGPT with "Browse" or "Code Interpreter" works — the LLM decides which tool to use.
+
+### Summary: Who Does What?
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  Component        │  Responsibility                        │
+├────────────────────────────────────────────────────────────┤
+│  YOUR CODE        │  Takes user question                   │
+│  (RAG pipeline)   │  Searches vector DB                    │
+│                   │  Finds relevant chunks                 │
+│                   │  Builds the final prompt               │
+│                   │  Sends everything to LLM               │
+├────────────────────────────────────────────────────────────┤
+│  VECTOR DATABASE  │  Stores all chunk embeddings           │
+│  (ChromaDB etc.)  │  Returns similar chunks when searched  │
+├────────────────────────────────────────────────────────────┤
+│  LLM              │  Receives the ready-made prompt        │
+│  (GPT/Claude)     │  Reads the context your code provided  │
+│                   │  Generates an answer based on context   │
+│                   │  Has NO idea RAG exists (in basic RAG) │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Key takeaway: The LLM is the "brain" but YOUR CODE is the "hands and eyes." Your code finds the documents, your code builds the prompt, and the LLM just reads what it's given.**
+
+---
+
+## What If the Answer is NOT in the PDF / Documents?
+
+This is a very real problem. Your vector database will **ALWAYS return something** — even if nothing is actually relevant. It just returns the "least bad" match.
+
+### The Problem: Vector Search Always Returns Results
+
+```
+Your documents are about: Company policies, HR rules, product info
+
+User asks: "What is the capital of France?"
+
+Vector DB: "Hmm... nothing matches well, but here's the closest chunk I have..."
+Returns:   "Our company headquarters is in San Francisco." (similarity: 0.25 — LOW)
+
+LLM receives this context and might say:
+❌ "Based on the documents, the capital is San Francisco" (WRONG — hallucination!)
+```
+
+The vector DB doesn't say "I found nothing." It always returns the top-K results, even if they are garbage.
+
+### Solution 1: Similarity Score Threshold (Most Common)
+
+Check the similarity score. If it's too low, **don't use the context**.
+
+```python
+def answer_with_rag(user_question):
+    results = collection.query(
+        query_texts=[user_question],
+        n_results=3,
+        include=["documents", "distances"]  # get similarity scores too
+    )
+
+    chunks = results['documents'][0]
+    scores = results['distances'][0]
+
+    THRESHOLD = 0.5  # only use chunks with similarity > 0.5
+
+    # Filter: keep only relevant chunks
+    relevant_chunks = [
+        chunk for chunk, score in zip(chunks, scores)
+        if score >= THRESHOLD
+    ]
+
+    if relevant_chunks:
+        # Good matches found — use RAG
+        context = "\n".join(relevant_chunks)
+        prompt = f"Context:\n{context}\n\nQuestion: {user_question}"
+    else:
+        # No good matches — tell the LLM there's no context
+        prompt = (
+            f"The user asked: {user_question}\n\n"
+            f"No relevant information was found in our documents. "
+            f"Politely tell the user you don't have that information."
+        )
+
+    return llm.generate(prompt)
+```
+
+```
+"What is our refund policy?"   → score 0.92 → ✅ USE context → accurate answer
+"Capital of France?"           → score 0.18 → ❌ SKIP context → "Sorry, I don't have that info"
+```
+
+### Solution 2: System Prompt Instructions (Simple but Less Reliable)
+
+Tell the LLM in the system prompt: "If the context doesn't help, say you don't know."
+
+```python
+system_prompt = """You are a helpful assistant that answers questions using ONLY
+the provided context.
+
+IMPORTANT RULES:
+- If the context does NOT contain the answer, say: "I don't have that information
+  in my knowledge base."
+- Do NOT make up answers.
+- Do NOT use your general knowledge — ONLY use the context provided.
+- If you're unsure, say you don't know.
+"""
+
+prompt = f"""Context:
+{context}
+
+Question: {user_question}
+
+Answer (remember: ONLY use the context above, say "I don't know" if the context
+doesn't contain the answer):"""
+```
+
+**Pros:** Very easy to implement
+**Cons:** LLMs don't always follow instructions — they may still hallucinate
+
+### Solution 3: Combine Both (Recommended for Production)
+
+Use threshold filtering **AND** system prompt instructions together.
+
+```python
+def answer_with_rag(user_question):
+    results = collection.query(query_texts=[user_question], n_results=3)
+    chunks = results['documents'][0]
+    scores = results['distances'][0]
+
+    THRESHOLD = 0.5
+    relevant_chunks = [c for c, s in zip(chunks, scores) if s >= THRESHOLD]
+
+    system_prompt = (
+        "Answer using ONLY the provided context. "
+        "If the context doesn't contain the answer, say 'I don't have that information.'"
+    )
+
+    if relevant_chunks:
+        context = "\n".join(relevant_chunks)
+        user_prompt = f"Context:\n{context}\n\nQuestion: {user_question}"
+    else:
+        user_prompt = (
+            f"No relevant context found.\n\n"
+            f"Question: {user_question}\n\n"
+            f"Respond that this question is outside your knowledge base."
+        )
+
+    return llm.generate(system_prompt=system_prompt, user_prompt=user_prompt)
+```
+
+### Solution 4: Fallback to General LLM (Optional)
+
+If RAG has no answer, let the LLM answer from its own knowledge — but **tell the user** it's not from the documents.
+
+```python
+if relevant_chunks:
+    answer = llm.generate(f"Context: {context}\nQuestion: {user_question}")
+    source = "📄 From your documents"
+else:
+    answer = llm.generate(f"Answer from general knowledge: {user_question}")
+    source = "⚠️ From general AI knowledge (not from your documents)"
+
+print(f"{source}\n{answer}")
+```
+
+```
+User: "What is our refund policy?"
+📄 From your documents
+→ "Refunds are available within 30 days of purchase."
+
+User: "What is the capital of France?"
+⚠️ From general AI knowledge (not from your documents)
+→ "The capital of France is Paris."
+```
+
+### What Happens in Each Scenario — Quick Reference
+
+| Scenario | What Happens | Best Approach |
+|----------|-------------|---------------|
+| Question matches docs well (score > 0.7) | RAG works perfectly | Use the context, generate answer |
+| Question partially matches (score 0.4-0.7) | RAG might work, risky | Use context cautiously + strong system prompt |
+| Question doesn't match at all (score < 0.4) | RAG returns garbage | Skip context, say "I don't know" or fallback |
+| Question is about something docs don't cover | Vector DB returns unrelated chunks | Threshold filter catches this |
+| User asks a general question ("What is AI?") | Might match too many chunks loosely | Router decides: skip RAG, answer directly |
+
+### The Golden Rule
+
+```
+RAG is NOT about answering every question.
+RAG is about answering questions FROM YOUR DATA accurately.
+
+For everything else → say "I don't know" or fallback gracefully.
+```
+
+---
+
 ## STEP 1: Document Chunking Strategy
 
 ### What is Chunking?
